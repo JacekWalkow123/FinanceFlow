@@ -1,40 +1,104 @@
+import OpenAI from 'openai'
+import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 
-export async function POST(request: NextRequest) {
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const supabase = createClient(supabaseUrl, supabaseKey!)
+
+const openai = new OpenAI({ 
+  apiKey: process.env.OPENAI_API_KEY! 
+})
+
+export async function POST(req: NextRequest) {
   try {
-    const { message } = await request.json()
+    const { message, userId } = await req.json()
     
-    const responses: Record<string, string> = {
-      hi: "Hey! 👋 Love helping with money. What's your goal - saving, investing, or debt?",
-      hello: "Hi there! 💰 What's your biggest money challenge right now?",
-      savings: "Smart! Target **20% income** ($800 on $4k/mo). Ally HYSA pays **4.5% APY**. Monthly income range?",
-      save: "Perfect start! **$1k emergency fund** first, then 3-6 months expenses. Current savings goal?",
-      invest: "Awesome! **VTI index fund** beats 90% of pros (10% returns). **$200/mo = $250k in 30 years**. Timeline?",
-      investing: "Love it! **401k match first** (free money), then VTI/S&P 500. Risk tolerance (low/med/high)?",
-      debt: "Priority! **>7% interest first** (avalanche method). List your highest rate debt?",
-      budget: "**50/30/20 rule**: 50% needs, 30% wants, 20% savings/debt. Monthly take-home pay?",
-      emergency: "**3-6 months expenses** ($6k-$12k goal). Start $1k in HYSA. Monthly bills total?",
-      help: "Happy to guide! Tell me: **savings**, **investing**, **debt**, or **budget**? Or share income!",
-      default: `Smart question about "${message}"! My plan: 1) **$1k emergency** 2) **High-interest debt** 3) **Index funds**. Monthly income?`
+    // Get user's household
+    const { data } = await supabase
+      .from('profiles')
+      .select('household_id')
+      .eq('id', userId)
+      .single()
+    
+    if (!data?.household_id) {
+      return NextResponse.json({ reply: "First: 'create household TestFamily'" })
     }
-    
-    const lowerMsg = message.toLowerCase().trim()
-    let responseKey = 'default'
-    
-    for (const [key, value] of Object.entries(responses)) {
-      if (lowerMsg.includes(key)) {
-        responseKey = key
-        break
-      }
+
+    const householdId = data.household_id
+
+    // PARSE COMMANDS FIRST
+    const commandResult = await parseCommand(message, householdId)
+    if (commandResult) {
+      return NextResponse.json({ reply: commandResult })
     }
+
+    // Get context for AI
+    const [budgets, debts, investments, totalsResponse] = await Promise.all([
+      supabase.from('budgets').select('*').eq('household_id', householdId),
+      supabase.from('debts').select('*').eq('household_id', householdId),
+      supabase.from('investments').select('*').eq('household_id', householdId),
+      supabase.rpc('get_household_totals', { hid: householdId }) // Simple sum later
+    ])
+
+    const txSummary = totalsResponse.data
+
+    const safeToSpend = 420 // Replace with real calc later
     
-    return NextResponse.json({ 
-      response: responses[responseKey as keyof typeof responses] 
+    const context = `Budgets: ${budgets.data?.length || 0}, Debts: ${debts.data?.length || 0}`
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `FinanceFlow AI. Safe to spend: €${safeToSpend}. ${context}
+Always be encouraging. Suggest logging salary/expenses.`
+        },
+        { role: 'user', content: message }
+      ]
     })
-    
+
+    return NextResponse.json({ 
+      reply: `💰 Safe to spend: €${safeToSpend}\n\n${completion.choices[0].message.content}` 
+    })
+
   } catch (error) {
-    return NextResponse.json({ 
-      response: "Hey! 💰 What's your main money goal right now?" 
-    })
+    console.error(error)
+    return NextResponse.json({ reply: 'Oops! Try again or check console.' })
   }
+}
+
+async function parseCommand(message: string, householdId: string) {
+  const msg = message.toLowerCase().trim()
+  const euroMatch = msg.match(/€?(\d+(?:\.\d{2})?)/i)
+  const amount = euroMatch ? parseFloat(euroMatch[1]) : 0
+
+  // CREATE HOUSEHOLD
+  if (msg.startsWith('create household')) {
+    const name = message.replace(/create household\s*/i, '').trim() || 'Family'
+    const { data } = await supabase.from('households').insert({ name }).select('id').single()
+    if (data) {
+      await supabase.from('profiles').update({ household_id: data.id }).eq('id', householdId)
+      return `✅ "${name}" household created! Now try "€2000 salary"`
+    }
+  }
+
+  // TRANSACTION
+  if (amount > 0) {
+    const category = msg.includes('grocery') || msg.includes('food') ? 'groceries' :
+                    msg.includes('rent') ? 'rent' :
+                    msg.includes('salary') ? 'salary' : 'general'
+    
+    const type = msg.includes('salary') ? 'income' : 'expense'
+    await supabase.from('transactions').insert({
+      household_id: householdId,
+      amount: type === 'income' ? amount : -amount,
+      category, type,
+      note: message
+    })
+    return `✅ €${amount} ${category} ${type}d.`
+  }
+
+  return null
 }

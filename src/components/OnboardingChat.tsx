@@ -1,5 +1,5 @@
 'use client'
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, FormEvent } from 'react'
 
 export default function OnboardingChat() {
   const [messages, setMessages] = useState([
@@ -24,7 +24,7 @@ export default function OnboardingChat() {
     scrollToBottom()
   }, [messages])
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!input.trim() || isLoading) return
 

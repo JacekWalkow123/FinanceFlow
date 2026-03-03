@@ -1,0 +1,9 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "scss.lint.unknownAtRules": "ignore",
+  "less.lint.unknownAtRules": "ignore",
+  // Tailwind CSS extension settings (if installed)
+  "tailwindCSS.includeLanguages": {
+    "plaintext": "html"
+  }
+}
